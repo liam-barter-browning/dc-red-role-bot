@@ -1,6 +1,12 @@
 # dc-red-role-bot
 
-Discord Bot cog (compatible with **Red - DiscordBot**) that gives each member a role matching their display name (or a custom handle). Cog name: **user_handle** for easier tagging across language/character sets, and keeps those role names in sync when users change their server nickname.
+Discord Bot cog (compatible with **Red - DiscordBot**). Cog name: **user_handle**. It gives each member a role matching their display name (or a custom handle) and keeps those role names in sync when users change their server nickname.
+
+## Purpose
+
+This cog enables **tagging across language and character sets**, and supports **parallel language / translation channels** where each member is only in the channel for their native language.
+
+In that setup you can’t @mention someone by name if they’re not in your channel. By giving everyone a role that matches their name (or a chosen handle), you can tag them via that role from any channel. Members who use a different alphabet can set a custom English (or other) handle so they can still be tagged easily.
 
 ## Features
 
