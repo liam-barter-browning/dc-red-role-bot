@@ -1,0 +1,7 @@
+{
+  "author": ["Liam"],
+  "description": "Gives each member a role matching their display name (or a custom handle) for easier tagging across language/character sets. Keeps role names in sync with server nicknames via a background task.",
+  "install_msg": "Thank you for installing user_handle. Use `[p]userhandle` to see commands. Ensure the bot's role is above the created roles so it can assign them.",
+  "short": "Per-user role tags synced to display name",
+  "tags": ["roles", "tags", "nicknames", "utility"]
+}
