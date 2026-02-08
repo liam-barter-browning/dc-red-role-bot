@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.5"
+__version__ = "2.6"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -167,8 +167,21 @@ class UserHandle(commands.Cog):
         async with self._sync_lock:
             for guild in self.bot.guilds:
                 try:
-                    await self._sync_guild_roles(guild)
-                    # No logging for background sync (auto-generated display-name roles) to avoid noise
+                    result = await self._sync_guild_roles(guild)
+                    if result is not None:
+                        updated, details = result
+                        log_msg = (
+                            f"**Success (chron)** — Background sync ran. {updated} user(s) affected.\n"
+                        )
+                        _max_lines = 25
+                        for i, (dname, uname, change) in enumerate(details):
+                            if i >= _max_lines:
+                                log_msg += f"\n… and {len(details) - _max_lines} more."
+                                break
+                            log_msg += f"\n• **{dname}** (username: `{uname}`): {change}."
+                        if not details:
+                            log_msg += "\n• No changes (all names already in sync)."
+                        await self._send_log_dm(guild, log_msg)
                 except Exception as e:
                     log.exception("UserHandle sync failed for guild %s: %s", guild.id, e)
                 await asyncio.sleep(0.5)  # avoid hammering the API
@@ -404,7 +417,7 @@ class UserHandle(commands.Cog):
                 name="Commands (admin)",
                 value=(
                     f"**{p}userhandle sync** — Ensure every member has a display-name role (run once for existing members).\n"
-                    f"**{p}userhandle logdm** — Toggle DMs for set/clear/remove (not for auto display-name sync).\n"
+                    f"**{p}userhandle logdm** — Toggle DMs for set/clear/remove and background (chron) sync.\n"
                     f"**{p}userhandle logchannel [#channel]** — Send logs to a channel instead of DMs (no channel = off).\n"
                     f"**{p}userhandle blacklist** — List reserved role names the bot will never create.\n"
                     f"**{p}userhandle blacklist add <name>** — Reserve a role name.\n"
@@ -602,7 +615,7 @@ class UserHandle(commands.Cog):
                 "DM logging is now **on** for this server. You'll receive a DM for:\n"
                 "• **set** – who set a custom handle and the role names\n"
                 "• **clear** / **remove** – who cleared or removed handles\n"
-                "(Auto-generated display-name sync is not logged to avoid noise.)"
+                "• **chron** – background sync (every ~5 min) summary"
             )
 
     @userhandle.command(name="logchannel")
@@ -623,7 +636,7 @@ class UserHandle(commands.Cog):
         await self.config.guild(ctx.guild).log_dm_user_id.set(None)  # switch from DM to channel
         await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
         await ctx.send(
-            f"UserHandle logs will now be sent to {channel.mention}. You'll see set/clear/remove there (auto display-name sync is not logged). "
+            f"UserHandle logs will now be sent to {channel.mention}. You'll see set/clear/remove and chron (background sync) there. "
             "Use `!userhandle logchannel` with no channel to turn this off, or `!userhandle logdm` to switch to DMs."
         )
 
