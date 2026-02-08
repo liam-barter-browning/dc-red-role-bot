@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "1.9"
+__version__ = "2.1"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -84,9 +84,30 @@ class UserHandle(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=0x726F6C655F746167, force_registration=True)
-        self.config.register_guild(role_assignments={})  # user_id -> {"role_id": int, "custom_name": str | None}
+        self.config.register_guild(
+            role_assignments={},
+            log_dm_user_id=None,  # user id to DM after background sync (toggle via !userhandle logdm)
+        )
         self._sync_lock = asyncio.Lock()
         self._last_sync_error: Optional[str] = None  # for reporting when sync creates 0 roles
+
+    async def _send_log_dm(self, guild: discord.Guild, message: str) -> None:
+        """If log DM is enabled for this guild, send the message to the configured user. Swallows errors."""
+        log_dm_id = await self.config.guild(guild).log_dm_user_id()
+        if not log_dm_id:
+            return
+        user = self.bot.get_user(log_dm_id)
+        if user is None:
+            try:
+                user = await self.bot.fetch_user(log_dm_id)
+            except (discord.NotFound, discord.HTTPException):
+                return
+        if user is None:
+            return
+        try:
+            await user.send(f"**UserHandle** | **{guild.name}**\n{message}")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def cog_load(self) -> None:
         self.sync_role_names.start()
@@ -101,7 +122,12 @@ class UserHandle(commands.Cog):
         async with self._sync_lock:
             for guild in self.bot.guilds:
                 try:
-                    await self._sync_guild_roles(guild)
+                    updated = await self._sync_guild_roles(guild)
+                    if updated is not None:
+                        await self._send_log_dm(
+                            guild,
+                            f"**Chron** (background sync): {updated} sync role(s) updated."
+                        )
                 except Exception as e:
                     log.exception("UserHandle sync failed for guild %s: %s", guild.id, e)
                 await asyncio.sleep(0.5)  # avoid hammering the API
@@ -110,16 +136,17 @@ class UserHandle(commands.Cog):
     async def before_sync_role_names(self) -> None:
         await self.bot.wait_until_ready()
 
-    async def _sync_guild_roles(self, guild: discord.Guild) -> None:
-        """Background: only update sync (display-name) roles. Never touch custom roles or roles we didn't create."""
+    async def _sync_guild_roles(self, guild: discord.Guild) -> Optional[int]:
+        """Background: only update sync (display-name) roles. Returns number of sync roles updated, or None if skipped."""
         data = await self.config.guild(guild).role_assignments()
         if not data:
-            return
+            return None
         try:
-            await guild.chunk()
-        except discord.HTTPException:
+            await asyncio.wait_for(guild.chunk(), timeout=10.0)
+        except (discord.HTTPException, asyncio.TimeoutError):
             pass
         existing_names = {r.name for r in guild.roles}
+        updated = 0
         for user_id_str, info in list(data.items()):
             try:
                 info = _normalize_info(info)
@@ -152,6 +179,7 @@ class UserHandle(commands.Cog):
                     await role.edit(name=unique_name, reason="UserHandle: sync display name")
                     existing_names.discard(role.name)
                     existing_names.add(unique_name)
+                    updated += 1
                 except (discord.Forbidden, discord.HTTPException):
                     pass
                 if not member.get_role(sync_role_id):
@@ -162,6 +190,7 @@ class UserHandle(commands.Cog):
             except (ValueError, KeyError):
                 pass
             await asyncio.sleep(0.2)
+        return updated
 
     def _unique_role_name(
         self,
@@ -294,6 +323,12 @@ class UserHandle(commands.Cog):
             await ctx.send("I couldn't create or update your custom handle. Check permissions.")
             return
         await ctx.send(f"You now have **{sync_role.name}** (from your display name) and **{custom_role.name}** (custom handle).")
+        await self._send_log_dm(
+            ctx.guild,
+            f"**set** | {ctx.author} (`{ctx.author.id}`)\n"
+            f"• Sync role: **{sync_role.name}** (display name)\n"
+            f"• Custom handle: **{custom_role.name}**"
+        )
 
     @userhandle.command(name="clear")
     async def userhandle_clear(self, ctx: commands.Context) -> None:
@@ -319,6 +354,28 @@ class UserHandle(commands.Cog):
             else:
                 assignments[user_id_str] = {k: v for k, v in entry.items() if k in ("sync_role_id", "custom_role_id", "custom_name")}
         await ctx.send("Custom handle removed. Your display-name role is unchanged and will keep syncing.")
+        await self._send_log_dm(
+            ctx.guild,
+            f"**clear** | {ctx.author} (`{ctx.author.id}`) cleared custom handle. Sync role unchanged."
+        )
+
+    @userhandle.command(name="logdm")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_logdm(self, ctx: commands.Context) -> None:
+        """[Admin] Toggle DM logging for all UserHandle actions (set, clear, sync, chron). When on, you get a DM listing changes."""
+        current = await self.config.guild(ctx.guild).log_dm_user_id()
+        if current == ctx.author.id:
+            await self.config.guild(ctx.guild).log_dm_user_id.set(None)
+            await ctx.send("DM logging is now **off** for this server. You will not receive DMs for set/clear/sync/chron.")
+        else:
+            await self.config.guild(ctx.guild).log_dm_user_id.set(ctx.author.id)
+            await ctx.send(
+                "DM logging is now **on** for this server. You'll receive a DM for:\n"
+                "• **set** – who set a custom handle and the role names\n"
+                "• **clear** – who cleared their custom handle\n"
+                "• **sync** – manual sync summary (roles ensured)\n"
+                "• **chron** – background sync (every ~5 min) summary"
+            )
 
     @userhandle.command(name="sync")
     @commands.admin_or_permissions(manage_roles=True)
@@ -364,12 +421,20 @@ class UserHandle(commands.Cog):
         msg = f"Sync complete. Display-name roles ensured for {created} non-bot members (custom handles left unchanged). (cog v{__version__})"
         if rest_used:
             msg += " (used API fallback)"
+        sync_error = self._last_sync_error
         if members_list and created == 0:
             msg += " — No roles were created: check that the bot has **Manage Roles** and its role is **above** the roles it creates in Server settings → Roles."
-            if self._last_sync_error:
-                msg += f" Discord error: `{self._last_sync_error}`"
+            if sync_error:
+                msg += f" Discord error: `{sync_error}`"
                 self._last_sync_error = None
         await ctx.send(msg)
+        log_msg = (
+            f"**sync** (manual) | {created} sync role(s) ensured for {len(members_list)} non-bot member(s)."
+            + (f" (used API fallback)" if rest_used else "")
+        )
+        if members_list and created == 0 and sync_error:
+            log_msg += f" Error: `{sync_error}`"
+        await self._send_log_dm(ctx.guild, log_msg)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
