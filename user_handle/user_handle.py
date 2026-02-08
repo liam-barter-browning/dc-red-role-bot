@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.4"
+__version__ = "2.5"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -136,6 +136,23 @@ class UserHandle(commands.Cog):
         blacklist = await self.config.guild(guild).role_blacklist()
         n = (name or "").strip().lower()
         return any((b or "").strip().lower() == n for b in (blacklist or []))
+
+    async def _is_handle_name_taken_by_another(
+        self, guild: discord.Guild, current_user_id: int, name: str
+    ) -> bool:
+        """True if another user in this guild already has this handle name in storage (case-insensitive)."""
+        if not (name or "").strip():
+            return False
+        want = (name or "").strip().lower()
+        assignments = await self.config.guild(guild).role_assignments()
+        for user_id_str, data in (assignments or {}).items():
+            if user_id_str == str(current_user_id):
+                continue
+            info = _normalize_info(data or {})
+            for c in info.get("custom_roles") or []:
+                if (c.get("name") or "").strip().lower() == want:
+                    return True
+        return False
 
     async def cog_load(self) -> None:
         self.sync_role_names.start()
@@ -414,6 +431,9 @@ class UserHandle(commands.Cog):
             return
         if await self._is_role_name_blacklisted(ctx.guild, name):
             await ctx.send("That handle is blacklisted by server admins and can't be used.")
+            return
+        if await self._is_handle_name_taken_by_another(ctx.guild, ctx.author.id, name):
+            await ctx.send("That handle is already in use by another member.")
             return
         custom_role = await self._ensure_custom_role(ctx.guild, ctx.author, name)
         if custom_role is None:
