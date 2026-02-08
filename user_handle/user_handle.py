@@ -227,6 +227,16 @@ class UserHandle(commands.Cog):
             log.warning("UserHandle: could not chunk guild %s: %s", ctx.guild.id, e)
             await ctx.send("Could not fetch the member list. Ensure the bot has the **Server Members Intent** enabled in the Developer Portal.")
             return
+        members_list = [m for m in ctx.guild.members if not m.bot]
+        if not members_list:
+            total = ctx.guild.member_count or 0
+            await ctx.send(
+                f"Sync finished but the bot sees **0 non-bot members** in this server. "
+                f"The server reports {total} total members. "
+                "So the bot is not receiving the full member list. Check: (1) **Server Members Intent** is enabled in the Developer Portal under your app → Bot → Privileged Gateway Intents. "
+                "(2) **Restart Red** fully after changing intents. (3) If you installed this cog from GitHub, push the latest code and run `!repo update dc-red-role-bot` then `!cog update user_handle` again."
+            )
+            return
         async with self._sync_lock:
             created = 0
             for member in ctx.guild.members:
@@ -236,7 +246,7 @@ class UserHandle(commands.Cog):
                 if role is not None:
                     created += 1
                 await asyncio.sleep(0.3)
-        await ctx.send(f"Sync complete. Tag roles ensured for members (processed up to {created} non-bot members).")
+        await ctx.send(f"Sync complete. Tag roles ensured for members (processed {created} non-bot members).")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
