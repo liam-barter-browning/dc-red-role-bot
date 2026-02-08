@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "1.8"
+__version__ = "1.9"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -326,16 +326,15 @@ class UserHandle(commands.Cog):
         """[Admin] Ensure every member has a tag role and names are in sync. Run this after enabling the cog on a server with existing members."""
         self._last_sync_error = None
         await ctx.send(f"Syncing tag roles for all members… This may take a while. (cog v{__version__})")
-        # Try cache first (chunk so gateway sends member list)
+        # Try cache first (chunk with timeout so we don't hang on slow gateway)
         try:
-            await ctx.guild.chunk()
-        except discord.HTTPException:
+            await asyncio.wait_for(ctx.guild.chunk(), timeout=15.0)
+        except (discord.HTTPException, asyncio.TimeoutError):
             pass
         members_list = [m for m in ctx.guild.members if not m.bot]
         rest_used = False
-        # If cache is empty (e.g. Red with strict member cache), fetch via REST
         if not members_list:
-            await ctx.send(f"Cache empty; fetching members via API… (cog v{__version__})")
+            await ctx.send(f"Cache empty or chunk timed out; fetching members via API… (cog v{__version__})")
             rest_members = await _fetch_guild_members_via_rest(self.bot, ctx.guild)
             if rest_members:
                 members_list = rest_members
