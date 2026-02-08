@@ -122,6 +122,7 @@ If you prefer to run from a clone on the same machine as the bot:
 | `[p]userhandle clear` | Remove **all** your custom handles (tracked by this bot). Your display-name role is kept and keeps syncing. |
 | `[p]userhandle sync` | **(Admin)** Ensure every member has a display-name role and names are in sync. Run once after enabling the cog for existing members. |
 | `[p]userhandle logdm` | **(Admin)** Toggle DM logging. When on, you get a DM for set, clear, remove, sync, and background sync. |
+| `[p]userhandle logchannel [#channel]` | **(Admin)** Send logs to a channel instead of DMs. Run with no channel to turn channel logging off. |
 | `[p]userhandle blacklist` | **(Admin)** List role names that the bot must never create or track (e.g. restriction/special roles). |
 | `[p]userhandle blacklist add <name>` | **(Admin)** Add a role name to the blacklist. The bot will not create or track handles with this name. |
 | `[p]userhandle blacklist remove <name>` | **(Admin)** Remove a role name from the blacklist. |

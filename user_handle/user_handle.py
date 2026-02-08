@@ -85,14 +85,26 @@ class UserHandle(commands.Cog):
         self.config = Config.get_conf(self, identifier=0x726F6C655F746167, force_registration=True)
         self.config.register_guild(
             role_assignments={},
-            log_dm_user_id=None,  # user id to DM after background sync (toggle via !userhandle logdm)
+            log_dm_user_id=None,  # user id to DM (toggle via !userhandle logdm); cleared when log channel is set
+            log_channel_id=None,  # channel to send logs to (set via !userhandle logchannel); cleared when logdm is set
             role_blacklist=[],  # role names the bot must never create or add to tracked handles
         )
         self._sync_lock = asyncio.Lock()
         self._last_sync_error: Optional[str] = None  # for reporting when sync creates 0 roles
 
     async def _send_log_dm(self, guild: discord.Guild, message: str) -> None:
-        """If log DM is enabled for this guild, send the message to the configured user. Swallows errors."""
+        """Send admin log to configured target: channel if set, otherwise DM user. Swallows errors."""
+        header = f"**UserHandle** — **Server:** {guild.name} (`{guild.id}`)"
+        full = f"{header}\n{message}"
+        log_channel_id = await self.config.guild(guild).log_channel_id()
+        if log_channel_id:
+            channel = guild.get_channel(log_channel_id)
+            if channel:
+                try:
+                    await channel.send(full)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            return
         log_dm_id = await self.config.guild(guild).log_dm_user_id()
         if not log_dm_id:
             return
@@ -104,9 +116,8 @@ class UserHandle(commands.Cog):
                 return
         if user is None:
             return
-        header = f"**UserHandle** — **Server:** {guild.name} (`{guild.id}`)"
         try:
-            await user.send(f"{header}\n{message}")
+            await user.send(full)
         except (discord.Forbidden, discord.HTTPException):
             pass
 
@@ -378,13 +389,14 @@ class UserHandle(commands.Cog):
                 value=(
                     f"**{p}userhandle sync** — Ensure every member has a display-name role (run once for existing members).\n"
                     f"**{p}userhandle logdm** — Toggle DMs for set/clear/remove/sync and background sync.\n"
+                    f"**{p}userhandle logchannel [#channel]** — Send logs to a channel instead of DMs (no channel = off).\n"
                     f"**{p}userhandle blacklist** — List reserved role names the bot will never create.\n"
                     f"**{p}userhandle blacklist add <name>** — Reserve a role name.\n"
                     f"**{p}userhandle blacklist remove <name>** — Unreserve a role name."
                 ),
                 inline=False,
             )
-        embed.set_footer(text=f"Cog v{__version__} • Use {p}help userhandle for command list.")
+        embed.set_footer(text=f"UserHandle v{__version__} • Use {p}help userhandle for command list.")
         await ctx.send(embed=embed)
 
     @userhandle.command(name="set")
@@ -555,20 +567,43 @@ class UserHandle(commands.Cog):
     @userhandle.command(name="logdm")
     @commands.admin_or_permissions(manage_roles=True)
     async def userhandle_logdm(self, ctx: commands.Context) -> None:
-        """[Admin] Toggle DM logging for all UserHandle actions (set, clear, sync, chron). When on, you get a DM listing changes."""
+        """[Admin] Toggle DM logging. When on, you get a DM for set/clear/remove/sync/chron. Clears channel logging if set."""
         current = await self.config.guild(ctx.guild).log_dm_user_id()
         if current == ctx.author.id:
             await self.config.guild(ctx.guild).log_dm_user_id.set(None)
-            await ctx.send("DM logging is now **off** for this server. You will not receive DMs for set/clear/sync/chron.")
+            await ctx.send("DM logging is now **off** for this server. You will not receive DMs for UserHandle actions.")
         else:
+            await self.config.guild(ctx.guild).log_channel_id.set(None)  # switch from channel to DM
             await self.config.guild(ctx.guild).log_dm_user_id.set(ctx.author.id)
             await ctx.send(
                 "DM logging is now **on** for this server. You'll receive a DM for:\n"
                 "• **set** – who set a custom handle and the role names\n"
-                "• **clear** – who cleared their custom handle\n"
-                "• **sync** – manual sync summary (roles ensured)\n"
+                "• **clear** / **remove** – who cleared or removed handles\n"
+                "• **sync** – manual sync summary\n"
                 "• **chron** – background sync (every ~5 min) summary"
             )
+
+    @userhandle.command(name="logchannel")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_logchannel(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None) -> None:
+        """[Admin] Send UserHandle logs to a channel instead of DMs. Pass a channel or leave empty to turn off channel logging."""
+        if channel is None:
+            current = await self.config.guild(ctx.guild).log_channel_id()
+            await self.config.guild(ctx.guild).log_channel_id.set(None)
+            if current:
+                await ctx.send("Channel logging is now **off**. Use `!userhandle logdm` to get logs in DMs, or set a channel again with `!userhandle logchannel #channel`.")
+            else:
+                await ctx.send(
+                    "No log channel is set. To send logs to a channel, run: `!userhandle logchannel #channel`. "
+                    "To get logs in DMs instead, run: `!userhandle logdm`."
+                )
+            return
+        await self.config.guild(ctx.guild).log_dm_user_id.set(None)  # switch from DM to channel
+        await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
+        await ctx.send(
+            f"UserHandle logs will now be sent to {channel.mention}. You'll see set/clear/remove/sync and background sync there. "
+            "Use `!userhandle logchannel` with no channel to turn this off, or `!userhandle logdm` to switch to DMs."
+        )
 
     @userhandle.command(name="sync")
     @commands.admin_or_permissions(manage_roles=True)
