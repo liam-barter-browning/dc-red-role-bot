@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.6"
+__version__ = "2.7"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -447,6 +447,11 @@ class UserHandle(commands.Cog):
             return
         if await self._is_handle_name_taken_by_another(ctx.guild, ctx.author.id, name):
             await ctx.send("That handle is already in use by another member.")
+            return
+        # Reject if name already exists as a role (would otherwise create "Name (2)")
+        existing_role_names = {r.name.strip().lower() for r in ctx.guild.roles}
+        if name.strip().lower() in existing_role_names:
+            await ctx.send("That handle is already in use. Choose a different name.")
             return
         custom_role = await self._ensure_custom_role(ctx.guild, ctx.author, name)
         if custom_role is None:
