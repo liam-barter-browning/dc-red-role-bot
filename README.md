@@ -17,12 +17,100 @@ In that setup you can’t @mention someone by name if they’re not in your chan
 ## Setup
 
 1. Install [Red - DiscordBot](https://github.com/Cog-Creators/Red-DiscordBot).
-2. Add the path that contains the `user_handle` folder (e.g. the repo root):
-   ```
-   [p]addpath /path/to/dc-red-role-bot
-   [p]load user_handle
-   ```
+2. Load the cog **from GitHub** (recommended) or [from a local path](#loading-from-a-local-path).
 3. Ensure the bot’s role in each server is **above** the roles it creates, and that it has **Manage Roles**.
+
+---
+
+## Loading from GitHub (recommended)
+
+Use Red’s **Downloader** cog to install **user_handle** from this repo. No local clone required.
+
+**Prerequisite:** This repository must be on GitHub (your fork or the original). Replace `YOUR_USERNAME` below with the GitHub username that owns the repo.
+
+### 1. Load Downloader
+
+In Discord (with your bot’s prefix, e.g. `!`):
+
+```
+[p]load downloader
+```
+
+(Skip if Downloader is already loaded.)
+
+### 2. Add this repo
+
+```
+[p]repo add dc-red-role-bot https://github.com/YOUR_USERNAME/dc-red-role-bot
+```
+
+Use the real repo URL. Examples:
+
+- Your fork: `!repo add dc-red-role-bot https://github.com/liam/dc-red-role-bot`
+- Default branch is used; you can add a branch name as a third argument if needed.
+
+### 3. Install the cog
+
+```
+[p]cog install dc-red-role-bot user_handle
+```
+
+### 4. Load the cog
+
+After install, load the cog (Red may not load it automatically):
+
+```
+[p]load user_handle
+```
+
+Then confirm:
+
+```
+[p]userhandle
+```
+
+(You should see the userhandle command help.)
+
+### 5. Bot role and permissions (per server)
+
+### 5. Bot role and permissions (per server)
+
+In **Server settings → Roles**:
+
+- The **bot’s role** must be **above** any role the cog creates.
+- The bot needs **Manage Roles**.
+
+### 6. Give existing members roles (optional)
+
+To create handle roles for **all current members** in a server, an admin runs once:
+
+```
+[p]userhandle sync
+```
+
+New members get a role automatically when they join.
+
+**If sync says "0 non-bot members":** (1) Enable **SERVER MEMBERS INTENT** in the [Discord Developer Portal](https://discord.com/developers/applications) → your app → **Bot** → **Privileged Gateway Intents**, then restart Red. (2) The cog now requests the full member list (chunking) when you run sync; update to the latest version (`[p]cog update user_handle`), then run `[p]userhandle sync` again.
+
+### Updating the cog later
+
+After you update the repo on GitHub:
+
+```
+[p]repo update dc-red-role-bot
+[p]cog update user_handle
+```
+
+---
+
+## Loading from a local path
+
+If you prefer to run from a clone on the same machine as the bot:
+
+1. **Path:** Use the folder that **contains** the `user_handle` folder (repo root), e.g. `/home/you/dc-red-role-bot` or `C:\Users\You\dc-red-role-bot`.
+2. **Add path:** `[p]addpath /full/path/to/dc-red-role-bot`
+3. **Load cog:** `[p]load user_handle`
+4. Then set bot role and permissions as in step 4 above, and optionally run `[p]userhandle sync` for existing members.
 
 ## Commands
 

@@ -55,6 +55,11 @@ class UserHandle(commands.Cog):
         data = await self.config.guild(guild).role_assignments()
         if not data:
             return
+        # Ensure member cache is populated so get_member() can find members
+        try:
+            await guild.chunk()
+        except discord.HTTPException:
+            pass  # Skip this guild this cycle
         existing_names = {r.name for r in guild.roles}
         for user_id_str, info in list(data.items()):
             try:
@@ -215,6 +220,13 @@ class UserHandle(commands.Cog):
     async def userhandle_sync(self, ctx: commands.Context) -> None:
         """[Admin] Ensure every member has a tag role and names are in sync. Run this after enabling the cog on a server with existing members."""
         await ctx.send("Syncing tag roles for all members… This may take a while.")
+        # Ensure the guild's member list is loaded (chunked); otherwise guild.members can be empty
+        try:
+            await ctx.guild.chunk()
+        except discord.HTTPException as e:
+            log.warning("UserHandle: could not chunk guild %s: %s", ctx.guild.id, e)
+            await ctx.send("Could not fetch the member list. Ensure the bot has the **Server Members Intent** enabled in the Developer Portal.")
+            return
         async with self._sync_lock:
             created = 0
             for member in ctx.guild.members:
