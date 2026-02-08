@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "1.3"
+__version__ = "1.4"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -266,11 +266,14 @@ class UserHandle(commands.Cog):
         except discord.HTTPException:
             pass
         members_list = [m for m in ctx.guild.members if not m.bot]
+        rest_used = False
         # If cache is empty (e.g. Red with strict member cache), fetch via REST
         if not members_list:
+            await ctx.send(f"Cache empty; fetching members via API… (cog v{__version__})")
             rest_members = await _fetch_guild_members_via_rest(self.bot, ctx.guild)
             if rest_members:
                 members_list = rest_members
+                rest_used = True
         if not members_list:
             total = ctx.guild.member_count or 0
             await ctx.send(
@@ -287,7 +290,12 @@ class UserHandle(commands.Cog):
                 if role is not None:
                     created += 1
                 await asyncio.sleep(0.3)
-        await ctx.send(f"Sync complete. Tag roles ensured for {created} non-bot members. (cog v{__version__})")
+        msg = f"Sync complete. Tag roles ensured for {created} non-bot members. (cog v{__version__})"
+        if rest_used:
+            msg += " (used API fallback)"
+        if members_list and created == 0:
+            msg += " — No roles were created: check that the bot has **Manage Roles** and its role is **above** the roles it creates in Server settings → Roles."
+        await ctx.send(msg)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
