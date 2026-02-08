@@ -300,10 +300,14 @@ class UserHandle(commands.Cog):
                         if self._last_sync_error is None:
                             self._last_sync_error = str(e)
                 return role
-        # Blacklist check for unique name we're about to use (e.g. "Name (2)")
+        # Never create a role when the requested name is blacklisted (e.g. don't create "Moderator (2)" if "Moderator" is blacklisted)
         existing_names = {r.name for r in guild.roles}
         unique_name = self._unique_role_name(guild, custom_name, existing_names)
         if await self._is_role_name_blacklisted(guild, unique_name):
+            return None
+        # Base name (before any " (2)" suffix) must also be blacklist-checked so we never create blacklisted-name (2)
+        base_name = unique_name.split(" (")[0].strip() if " (" in unique_name else unique_name
+        if await self._is_role_name_blacklisted(guild, base_name):
             return None
         # Create new role and add to tracked list only when we create it (never adopt existing server roles)
         try:
@@ -401,11 +405,15 @@ class UserHandle(commands.Cog):
             await ctx.send("I couldn't create or update your display-name role. Check that my role is above the roles I create and I have *Manage Roles*.")
             return
         if await self._is_role_name_blacklisted(ctx.guild, name):
-            await ctx.send("That role name is reserved and can't be used for custom handles.")
+            await ctx.send("That handle is blacklisted by server admins and can't be used.")
             return
         custom_role = await self._ensure_custom_role(ctx.guild, ctx.author, name)
         if custom_role is None:
-            await ctx.send("I couldn't create or update your custom handle. Check permissions or that the name isn't reserved.")
+            # Distinguish blacklist (don't create Name (2)) from other failures
+            if await self._is_role_name_blacklisted(ctx.guild, name):
+                await ctx.send("That handle is blacklisted by server admins and can't be used.")
+            else:
+                await ctx.send("I couldn't create or update your custom handle. Check permissions.")
             return
         info = _normalize_info((await self.config.guild(ctx.guild).role_assignments()).get(str(ctx.author.id)) or {})
         custom_names = [c.get("name") for c in (info.get("custom_roles") or []) if c.get("name")]
