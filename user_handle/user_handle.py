@@ -17,6 +17,7 @@ try:
 except ImportError:
     Route = None
 
+__version__ = "1.3"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -258,7 +259,7 @@ class UserHandle(commands.Cog):
     @commands.admin_or_permissions(manage_roles=True)
     async def userhandle_sync(self, ctx: commands.Context) -> None:
         """[Admin] Ensure every member has a tag role and names are in sync. Run this after enabling the cog on a server with existing members."""
-        await ctx.send("Syncing tag roles for all members… This may take a while.")
+        await ctx.send(f"Syncing tag roles for all members… This may take a while. (cog v{__version__})")
         # Try cache first (chunk so gateway sends member list)
         try:
             await ctx.guild.chunk()
@@ -274,7 +275,7 @@ class UserHandle(commands.Cog):
             total = ctx.guild.member_count or 0
             await ctx.send(
                 f"Could not get the member list (cache and REST both failed or returned 0). "
-                f"Server reports {total} total members. "
+                f"Server reports {total} total members. (cog v{__version__}) "
                 "Ensure **Server Members Intent** is enabled in the Developer Portal (Bot → Privileged Gateway Intents), then **restart Red** fully. "
                 "If the problem persists, push the latest cog code to GitHub and run `!repo update dc-red-role-bot` then `!cog update user_handle`."
             )
@@ -286,7 +287,7 @@ class UserHandle(commands.Cog):
                 if role is not None:
                     created += 1
                 await asyncio.sleep(0.3)
-        await ctx.send(f"Sync complete. Tag roles ensured for {created} non-bot members.")
+        await ctx.send(f"Sync complete. Tag roles ensured for {created} non-bot members. (cog v{__version__})")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
