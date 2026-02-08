@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "1.7"
+__version__ = "1.8"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -350,13 +350,18 @@ class UserHandle(commands.Cog):
             )
             return
         # Only create/update sync (display-name) roles. Custom handles are never touched.
-        async with self._sync_lock:
-            created = 0
-            for member in members_list:
+        # Don't use _sync_lock here so we don't block waiting on the background task (which can hold it for a while).
+        created = 0
+        for member in members_list:
+            try:
                 role = await self._ensure_sync_role(ctx.guild, member)
                 if role is not None:
                     created += 1
-                await asyncio.sleep(0.3)
+            except Exception as e:
+                log.exception("UserHandle: sync failed for member %s: %s", member.id, e)
+                if self._last_sync_error is None:
+                    self._last_sync_error = str(e)
+            await asyncio.sleep(0.3)
         msg = f"Sync complete. Display-name roles ensured for {created} non-bot members (custom handles left unchanged). (cog v{__version__})"
         if rest_used:
             msg += " (used API fallback)"
