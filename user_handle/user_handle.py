@@ -12,12 +12,51 @@ import discord
 from discord.ext import tasks
 from redbot.core import Config, commands
 
+try:
+    from discord.http import Route
+except ImportError:
+    Route = None
+
 log = logging.getLogger("red.cog.user_handle")
 
 
 def _display_name(member: discord.Member) -> str:
     """Server display name: nickname if set, else username."""
     return member.display_name or member.name
+
+
+async def _fetch_guild_members_via_rest(bot, guild: discord.Guild):
+    """Fetch all guild members via REST API. Use when cache is empty (e.g. Red with strict member cache)."""
+    if Route is None:
+        return None
+    state = getattr(bot, "_connection", None) or getattr(bot, "connection", None)
+    if not state or not hasattr(bot, "http"):
+        return None
+    members = []
+    after = 0
+    try:
+        while True:
+            # Discord API: GET /guilds/{id}/members?limit=1000&after={after}
+            route = Route("GET", "/guilds/{guild_id}/members", guild_id=guild.id)
+            params = {"limit": 1000, "after": after}
+            data = await bot.http.request(route, params=params)
+            if not data:
+                break
+            for mdata in data:
+                try:
+                    member = discord.Member(data=mdata, guild=guild, state=state)
+                    if not member.bot:
+                        members.append(member)
+                except Exception:
+                    continue
+            if len(data) < 1000:
+                break
+            after = int(data[-1]["user"]["id"])
+            await asyncio.sleep(0.5)
+    except (discord.Forbidden, discord.HTTPException, AttributeError, KeyError) as e:
+        log.warning("UserHandle: REST fetch_members failed for guild %s: %s", guild.id, e)
+        return None
+    return members
 
 
 class UserHandle(commands.Cog):
@@ -220,33 +259,34 @@ class UserHandle(commands.Cog):
     async def userhandle_sync(self, ctx: commands.Context) -> None:
         """[Admin] Ensure every member has a tag role and names are in sync. Run this after enabling the cog on a server with existing members."""
         await ctx.send("Syncing tag roles for all members… This may take a while.")
-        # Ensure the guild's member list is loaded (chunked); otherwise guild.members can be empty
+        # Try cache first (chunk so gateway sends member list)
         try:
             await ctx.guild.chunk()
-        except discord.HTTPException as e:
-            log.warning("UserHandle: could not chunk guild %s: %s", ctx.guild.id, e)
-            await ctx.send("Could not fetch the member list. Ensure the bot has the **Server Members Intent** enabled in the Developer Portal.")
-            return
+        except discord.HTTPException:
+            pass
         members_list = [m for m in ctx.guild.members if not m.bot]
+        # If cache is empty (e.g. Red with strict member cache), fetch via REST
+        if not members_list:
+            rest_members = await _fetch_guild_members_via_rest(self.bot, ctx.guild)
+            if rest_members:
+                members_list = rest_members
         if not members_list:
             total = ctx.guild.member_count or 0
             await ctx.send(
-                f"Sync finished but the bot sees **0 non-bot members** in this server. "
-                f"The server reports {total} total members. "
-                "So the bot is not receiving the full member list. Check: (1) **Server Members Intent** is enabled in the Developer Portal under your app → Bot → Privileged Gateway Intents. "
-                "(2) **Restart Red** fully after changing intents. (3) If you installed this cog from GitHub, push the latest code and run `!repo update dc-red-role-bot` then `!cog update user_handle` again."
+                f"Could not get the member list (cache and REST both failed or returned 0). "
+                f"Server reports {total} total members. "
+                "Ensure **Server Members Intent** is enabled in the Developer Portal (Bot → Privileged Gateway Intents), then **restart Red** fully. "
+                "If the problem persists, push the latest cog code to GitHub and run `!repo update dc-red-role-bot` then `!cog update user_handle`."
             )
             return
         async with self._sync_lock:
             created = 0
-            for member in ctx.guild.members:
-                if member.bot:
-                    continue
+            for member in members_list:
                 role = await self._ensure_member_role(ctx.guild, member, custom_name=None)
                 if role is not None:
                     created += 1
                 await asyncio.sleep(0.3)
-        await ctx.send(f"Sync complete. Tag roles ensured for members (processed {created} non-bot members).")
+        await ctx.send(f"Sync complete. Tag roles ensured for {created} non-bot members.")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
