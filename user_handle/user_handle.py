@@ -123,12 +123,21 @@ class UserHandle(commands.Cog):
         async with self._sync_lock:
             for guild in self.bot.guilds:
                 try:
-                    updated = await self._sync_guild_roles(guild)
-                    if updated is not None:
-                        await self._send_log_dm(
-                            guild,
-                            f"**Success (chron)** — Background sync ran. {updated} sync role(s) had their names updated."
+                    result = await self._sync_guild_roles(guild)
+                    if result is not None:
+                        updated, details = result
+                        log_msg = (
+                            f"**Success (chron)** — Background sync ran. {updated} user(s) affected.\n"
                         )
+                        _max_lines = 25
+                        for i, (dname, uname, change) in enumerate(details):
+                            if i >= _max_lines:
+                                log_msg += f"\n… and {len(details) - _max_lines} more."
+                                break
+                            log_msg += f"\n• **{dname}** (username: `{uname}`): {change}."
+                        if not details:
+                            log_msg += "\n• No changes (all names already in sync)."
+                        await self._send_log_dm(guild, log_msg)
                 except Exception as e:
                     log.exception("UserHandle sync failed for guild %s: %s", guild.id, e)
                 await asyncio.sleep(0.5)  # avoid hammering the API
@@ -137,8 +146,10 @@ class UserHandle(commands.Cog):
     async def before_sync_role_names(self) -> None:
         await self.bot.wait_until_ready()
 
-    async def _sync_guild_roles(self, guild: discord.Guild) -> Optional[int]:
-        """Background: only update sync (display-name) roles. Returns number of sync roles updated, or None if skipped."""
+    async def _sync_guild_roles(
+        self, guild: discord.Guild
+    ) -> Optional[tuple[int, list[tuple[str, str, str]]]]:
+        """Background: only update sync (display-name) roles. Returns (updated_count, [(display_name, username, change_text), ...]) or None if skipped."""
         data = await self.config.guild(guild).role_assignments()
         if not data:
             return None
@@ -148,6 +159,7 @@ class UserHandle(commands.Cog):
             pass
         existing_names = {r.name for r in guild.roles}
         updated = 0
+        details: list[tuple[str, str, str]] = []  # (display_name, username, change_text)
         for user_id_str, info in list(data.items()):
             try:
                 info = _normalize_info(info)
@@ -168,10 +180,13 @@ class UserHandle(commands.Cog):
                 if not member:
                     continue
                 desired_name = (_display_name(member) or member.name).strip() or member.name
+                dname, uname = member.display_name, member.name
                 if role.name == desired_name:
                     if not member.get_role(sync_role_id):
                         try:
                             await member.add_roles(role, reason="UserHandle: re-add sync role")
+                            updated += 1
+                            details.append((dname, uname, "sync role re-added to member"))
                         except (discord.Forbidden, discord.HTTPException):
                             pass
                     continue
@@ -181,6 +196,7 @@ class UserHandle(commands.Cog):
                     existing_names.discard(role.name)
                     existing_names.add(unique_name)
                     updated += 1
+                    details.append((dname, uname, f"sync role renamed to **{unique_name}**"))
                 except (discord.Forbidden, discord.HTTPException):
                     pass
                 if not member.get_role(sync_role_id):
@@ -191,7 +207,7 @@ class UserHandle(commands.Cog):
             except (ValueError, KeyError):
                 pass
             await asyncio.sleep(0.2)
-        return updated
+        return (updated, details)
 
     def _unique_role_name(
         self,
@@ -327,9 +343,8 @@ class UserHandle(commands.Cog):
         await self._send_log_dm(
             ctx.guild,
             f"**Success (set)** — Custom handle added.\n"
-            f"• User: {ctx.author} (`{ctx.author.id}`)\n"
-            f"• Sync role (display name): **{sync_role.name}**\n"
-            f"• Custom handle role: **{custom_role.name}**"
+            f"• **User affected:** {ctx.author.display_name} (username: `{ctx.author.name}`, id: `{ctx.author.id}`)\n"
+            f"• **Changes applied:** Assigned sync role **{sync_role.name}** (display name); assigned custom handle role **{custom_role.name}**."
         )
 
     @userhandle.command(name="clear")
@@ -359,7 +374,8 @@ class UserHandle(commands.Cog):
         await self._send_log_dm(
             ctx.guild,
             f"**Success (clear)** — Custom handle removed.\n"
-            f"• User: {ctx.author} (`{ctx.author.id}`). Sync role left unchanged."
+            f"• **User affected:** {ctx.author.display_name} (username: `{ctx.author.name}`, id: `{ctx.author.id}`)\n"
+            f"• **Changes applied:** Custom handle role removed from user; sync role left unchanged."
         )
 
     @userhandle.command(name="logdm")
@@ -409,13 +425,14 @@ class UserHandle(commands.Cog):
             )
             return
         # Only create/update sync (display-name) roles. Custom handles are never touched.
-        # Don't use _sync_lock here so we don't block waiting on the background task (which can hold it for a while).
         created = 0
+        details_list = []  # (display_name, username, role_name)
         for member in members_list:
             try:
                 role = await self._ensure_sync_role(ctx.guild, member)
                 if role is not None:
                     created += 1
+                    details_list.append((member.display_name, member.name, role.name))
             except Exception as e:
                 log.exception("UserHandle: sync failed for member %s: %s", member.id, e)
                 if self._last_sync_error is None:
@@ -432,10 +449,17 @@ class UserHandle(commands.Cog):
                 self._last_sync_error = None
         await ctx.send(msg)
         log_msg = (
-            f"**Success (sync)** — Manual sync completed.\n"
-            f"• {created} sync role(s) ensured for {len(members_list)} non-bot member(s)."
-            + (f" (used API fallback)" if rest_used else "")
+            f"**Success (sync)** — Manual sync completed. {created} user(s) affected.\n"
+            + (f"(used API fallback)\n" if rest_used else "")
         )
+        _max_lines = 25
+        for i, (dname, uname, rname) in enumerate(details_list):
+            if i >= _max_lines:
+                log_msg += f"\n… and {len(details_list) - _max_lines} more."
+                break
+            log_msg += f"\n• **{dname}** (username: `{uname}`): sync role **{rname}** ensured."
+        if not details_list:
+            log_msg += f"\n• No roles created/updated. (Members processed: {len(members_list)}.)"
         if members_list and created == 0 and sync_error:
             log_msg += f"\n• Error: `{sync_error}`"
         await self._send_log_dm(ctx.guild, log_msg)
