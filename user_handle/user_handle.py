@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.1"
+__version__ = "2.2"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -104,8 +104,9 @@ class UserHandle(commands.Cog):
                 return
         if user is None:
             return
+        header = f"**UserHandle** — **Server:** {guild.name} (`{guild.id}`)"
         try:
-            await user.send(f"**UserHandle** | **{guild.name}**\n{message}")
+            await user.send(f"{header}\n{message}")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
@@ -126,7 +127,7 @@ class UserHandle(commands.Cog):
                     if updated is not None:
                         await self._send_log_dm(
                             guild,
-                            f"**Chron** (background sync): {updated} sync role(s) updated."
+                            f"**Success (chron)** — Background sync ran. {updated} sync role(s) had their names updated."
                         )
                 except Exception as e:
                     log.exception("UserHandle sync failed for guild %s: %s", guild.id, e)
@@ -325,9 +326,10 @@ class UserHandle(commands.Cog):
         await ctx.send(f"You now have **{sync_role.name}** (from your display name) and **{custom_role.name}** (custom handle).")
         await self._send_log_dm(
             ctx.guild,
-            f"**set** | {ctx.author} (`{ctx.author.id}`)\n"
-            f"• Sync role: **{sync_role.name}** (display name)\n"
-            f"• Custom handle: **{custom_role.name}**"
+            f"**Success (set)** — Custom handle added.\n"
+            f"• User: {ctx.author} (`{ctx.author.id}`)\n"
+            f"• Sync role (display name): **{sync_role.name}**\n"
+            f"• Custom handle role: **{custom_role.name}**"
         )
 
     @userhandle.command(name="clear")
@@ -356,7 +358,8 @@ class UserHandle(commands.Cog):
         await ctx.send("Custom handle removed. Your display-name role is unchanged and will keep syncing.")
         await self._send_log_dm(
             ctx.guild,
-            f"**clear** | {ctx.author} (`{ctx.author.id}`) cleared custom handle. Sync role unchanged."
+            f"**Success (clear)** — Custom handle removed.\n"
+            f"• User: {ctx.author} (`{ctx.author.id}`). Sync role left unchanged."
         )
 
     @userhandle.command(name="logdm")
@@ -429,11 +432,12 @@ class UserHandle(commands.Cog):
                 self._last_sync_error = None
         await ctx.send(msg)
         log_msg = (
-            f"**sync** (manual) | {created} sync role(s) ensured for {len(members_list)} non-bot member(s)."
+            f"**Success (sync)** — Manual sync completed.\n"
+            f"• {created} sync role(s) ensured for {len(members_list)} non-bot member(s)."
             + (f" (used API fallback)" if rest_used else "")
         )
         if members_list and created == 0 and sync_error:
-            log_msg += f" Error: `{sync_error}`"
+            log_msg += f"\n• Error: `{sync_error}`"
         await self._send_log_dm(ctx.guild, log_msg)
 
     @commands.Cog.listener()
