@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.7"
+__version__ = "2.9"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -154,6 +154,19 @@ class UserHandle(commands.Cog):
                     return True
         return False
 
+    def _is_role_still_in_use(
+        self, assignments: dict, role_id: int, exclude_user_id: int
+    ) -> bool:
+        """True if any user (except exclude_user_id) has this role_id in their custom_roles."""
+        for user_id_str, data in (assignments or {}).items():
+            if user_id_str == str(exclude_user_id):
+                continue
+            info = _normalize_info(data or {})
+            for c in info.get("custom_roles") or []:
+                if c.get("role_id") == role_id:
+                    return True
+        return False
+
     async def cog_load(self) -> None:
         self.sync_role_names.start()
 
@@ -169,7 +182,7 @@ class UserHandle(commands.Cog):
                 try:
                     result = await self._sync_guild_roles(guild)
                     if result is not None:
-                        updated, details = result
+                        updated, details, errors = result
                         log_msg = (
                             f"**Success (chron)** — Background sync ran. {updated} user(s) affected.\n"
                         )
@@ -181,6 +194,13 @@ class UserHandle(commands.Cog):
                             log_msg += f"\n• **{dname}** (username: `{uname}`): {change}."
                         if not details:
                             log_msg += "\n• No changes (all names already in sync)."
+                        if errors:
+                            log_msg += "\n\n**Errors (duplicate display names, skipped):**"
+                            for i, (dname, uname, err) in enumerate(errors):
+                                if i >= _max_lines:
+                                    log_msg += f"\n… and {len(errors) - _max_lines} more."
+                                    break
+                                log_msg += f"\n• **{dname}** (username: `{uname}`): {err}."
                         await self._send_log_dm(guild, log_msg)
                 except Exception as e:
                     log.exception("UserHandle sync failed for guild %s: %s", guild.id, e)
@@ -192,8 +212,8 @@ class UserHandle(commands.Cog):
 
     async def _sync_guild_roles(
         self, guild: discord.Guild
-    ) -> Optional[tuple[int, list[tuple[str, str, str]]]]:
-        """Background: only update sync (display-name) roles. Returns (updated_count, [(display_name, username, change_text), ...]) or None if skipped."""
+    ) -> Optional[tuple[int, list[tuple[str, str, str]], list[tuple[str, str, str]]]]:
+        """Background: only update sync (display-name) roles. Returns (updated_count, details, errors) or None if skipped."""
         data = await self.config.guild(guild).role_assignments()
         if not data:
             return None
@@ -204,6 +224,7 @@ class UserHandle(commands.Cog):
         existing_names = {r.name for r in guild.roles}
         updated = 0
         details: list[tuple[str, str, str]] = []  # (display_name, username, change_text)
+        errors: list[tuple[str, str, str]] = []   # (display_name, username, error_text)
         for user_id_str, info in list(data.items()):
             try:
                 info = _normalize_info(info)
@@ -235,6 +256,9 @@ class UserHandle(commands.Cog):
                             pass
                     continue
                 unique_name = self._unique_role_name(guild, desired_name, existing_names, exclude_role=role)
+                if unique_name != desired_name:
+                    errors.append((dname, uname, f"Duplicate display name '{desired_name}', skipped"))
+                    continue
                 try:
                     await role.edit(name=unique_name, reason="UserHandle: sync display name")
                     existing_names.discard(role.name)
@@ -251,7 +275,7 @@ class UserHandle(commands.Cog):
             except (ValueError, KeyError):
                 pass
             await asyncio.sleep(0.2)
-        return (updated, details)
+        return (updated, details, errors)
 
     def _unique_role_name(
         self,
@@ -284,6 +308,10 @@ class UserHandle(commands.Cog):
         role = guild.get_role(sync_role_id) if sync_role_id else None
         if role is None:
             unique_name = self._unique_role_name(guild, name_to_use, existing_names)
+            if unique_name != name_to_use:
+                if self._last_sync_error is None:
+                    self._last_sync_error = f"Duplicate display name: '{name_to_use}' already in use"
+                return None
             try:
                 role = await guild.create_role(
                     name=unique_name,
@@ -302,6 +330,10 @@ class UserHandle(commands.Cog):
         else:
             if role.name != name_to_use:
                 unique_name = self._unique_role_name(guild, name_to_use, existing_names, exclude_role=role)
+                if unique_name != name_to_use:
+                    if self._last_sync_error is None:
+                        self._last_sync_error = f"Duplicate display name: '{name_to_use}' already in use"
+                    return role
                 try:
                     await role.edit(name=unique_name, reason="UserHandle: sync display name")
                 except (discord.Forbidden, discord.HTTPException):
@@ -346,6 +378,9 @@ class UserHandle(commands.Cog):
         # Base name (before any " (2)" suffix) must also be blacklist-checked so we never create blacklisted-name (2)
         base_name = unique_name.split(" (")[0].strip() if " (" in unique_name else unique_name
         if await self._is_role_name_blacklisted(guild, base_name):
+            return None
+        # Never create "Name (2)" — if name is taken, fail (caller should have checked existing_role_names)
+        if unique_name != custom_name:
             return None
         # Create new role and add to tracked list only when we create it (never adopt existing server roles)
         try:
@@ -500,6 +535,17 @@ class UserHandle(commands.Cog):
                 assignments.pop(user_id_str, None)
             else:
                 assignments[user_id_str] = {"sync_role_id": entry["sync_role_id"], "custom_roles": []}
+            # Delete roles from Discord if no other user has them
+            for c in custom_roles:
+                rid = c.get("role_id")
+                if not rid or self._is_role_still_in_use(assignments, rid, ctx.author.id):
+                    continue
+                role = ctx.guild.get_role(rid)
+                if role:
+                    try:
+                        await role.delete(reason="UserHandle: handle cleared, no other users")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
         n = len(removed_names)
         await ctx.send(f"Custom handle(s) removed ({n} role(s)). Your display-name role is unchanged and will keep syncing.")
         names_txt = ", ".join(f"**{x}**" for x in removed_names) if removed_names else "—"
@@ -552,6 +598,13 @@ class UserHandle(commands.Cog):
                 assignments.pop(user_id_str, None)
             else:
                 assignments[user_id_str] = {"sync_role_id": entry.get("sync_role_id"), "custom_roles": new_list}
+            # Delete role from Discord if no other user has it
+            if rid and not self._is_role_still_in_use(assignments, rid, ctx.author.id):
+                if role:
+                    try:
+                        await role.delete(reason="UserHandle: handle removed, no other users")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
         await ctx.send(f"Removed custom handle **{name}**. Your display-name role is unchanged.")
         await self._send_log_dm(
             ctx.guild,
