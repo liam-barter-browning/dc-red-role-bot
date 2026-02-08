@@ -11,8 +11,9 @@ In that setup you can’t @mention someone by name if they’re not in your chan
 ## Features
 
 - **Per-user role**: Each member gets a role whose name matches their **server display name** (nickname if set, otherwise username).
-- **Custom handles**: Members can set a custom role name (e.g. an English handle) so they can be tagged easily even if their username uses another alphabet.
-- **Background sync**: A task runs every 5 minutes and updates bot-managed role names to match current display names (and re-applies roles if needed). When a user changes their server nickname, their role name is updated automatically.
+- **Custom handles**: Members can add one or more custom handle roles via `set`; each is tracked so they can remove only those with `remove`. Only roles created by the bot are tracked (existing server roles are never adopted).
+- **Blacklist**: Admins can reserve role names so the bot never creates or tracks handles with those names (e.g. for restriction or other-bot roles).
+- **Background sync**: A task runs every 5 minutes and updates display-name role names to match current nicknames (and re-applies roles if needed). Custom handles are left unchanged.
 
 ## Setup
 
@@ -73,8 +74,6 @@ Then confirm:
 
 ### 5. Bot role and permissions (per server)
 
-### 5. Bot role and permissions (per server)
-
 In **Server settings → Roles**:
 
 - The **bot’s role** must be **above** any role the cog creates.
@@ -117,16 +116,23 @@ If you prefer to run from a clone on the same machine as the bot:
 | Command | Description |
 |--------|-------------|
 | `[p]userhandle` | Show help. |
-| `[p]userhandle set <name>` | Set your custom role name (handle) in this server. |
-| `[p]userhandle clear` | Clear your custom name; your role will sync to your current display name. |
-| `[p]userhandle sync` | **(Admin)** Ensure every member has a tag role and names are in sync. Run once after enabling the cog if you want existing members to get roles. |
+| `[p]userhandle set <name>` | Add a custom handle (role) for yourself. Only adds; does not remove other handles. You can have multiple. |
+| `[p]userhandle remove <name>` | Remove one custom handle. Only removes roles that were added by this bot via `set` (tracked handles). |
+| `[p]userhandle clear` | Remove **all** your custom handles (tracked by this bot). Your display-name role is kept and keeps syncing. |
+| `[p]userhandle sync` | **(Admin)** Ensure every member has a display-name role and names are in sync. Run once after enabling the cog for existing members. |
+| `[p]userhandle logdm` | **(Admin)** Toggle DM logging. When on, you get a DM for set, clear, remove, sync, and background sync. |
+| `[p]userhandle blacklist` | **(Admin)** List role names that the bot must never create or track (e.g. restriction/special roles). |
+| `[p]userhandle blacklist add <name>` | **(Admin)** Add a role name to the blacklist. The bot will not create or track handles with this name. |
+| `[p]userhandle blacklist remove <name>` | **(Admin)** Remove a role name from the blacklist. |
 
 ## Behaviour
 
 - **New members**: On join, a role is created with their display name and assigned to them.
 - **Display name**: In each server, “display name” means the member’s nickname if set, otherwise their global username.
 - **Uniqueness**: If two members would have the same role name, the second gets a suffix like ` (2)` so role names stay unique in the guild.
-- **Cron**: Every 5 minutes the cog checks all stored user→role mappings; if a member has no custom handle and their role name differs from their current display name, the role name is updated.
+- **Tracked handles**: Only roles **created** by the bot via `set` are tracked. The `remove` command can only remove those. Existing server roles (e.g. permission roles) are never added to the tracked list.
+- **Blacklist**: Admins can blacklist role names. The bot will not create or track a handle with a blacklisted name, so you can reserve names used for restrictions or other bots.
+- **Cron**: Every 5 minutes the cog updates display-name (sync) role names to match current nicknames and re-applies roles if needed. Custom handles are not renamed by the background task.
 
 ## License
 
