@@ -22,21 +22,20 @@ log = logging.getLogger("red.cog.user_handle")
 
 
 def _normalize_info(info: dict) -> dict:
-    """Normalize stored info to sync_role_id, custom_role_id, custom_name. Handles old format (role_id + custom_name)."""
-    out = {
-        "sync_role_id": info.get("sync_role_id"),
-        "custom_role_id": info.get("custom_role_id"),
-        "custom_name": info.get("custom_name"),
-    }
+    """Normalize stored info to sync_role_id and custom_roles (list of {role_id, name}). Handles old format."""
+    custom_roles = list(info.get("custom_roles") or [])
+    # Migrate from single custom_role_id + custom_name
+    old_id, old_name = info.get("custom_role_id"), info.get("custom_name")
+    if old_id is not None and not any(c.get("role_id") == old_id for c in custom_roles):
+        custom_roles.append({"role_id": old_id, "name": (old_name or "custom")})
+    sync_role_id = info.get("sync_role_id")
     legacy_role_id = info.get("role_id")
-    if legacy_role_id is not None and out["sync_role_id"] is None and out["custom_role_id"] is None:
-        if out["custom_name"]:
-            out["custom_role_id"] = legacy_role_id
-            out["sync_role_id"] = None
+    if legacy_role_id is not None and sync_role_id is None and not custom_roles:
+        if old_name:
+            custom_roles = [{"role_id": legacy_role_id, "name": old_name}]
         else:
-            out["sync_role_id"] = legacy_role_id
-            out["custom_role_id"] = None
-    return out
+            sync_role_id = legacy_role_id
+    return {"sync_role_id": sync_role_id, "custom_roles": custom_roles}
 
 
 def _display_name(member: discord.Member) -> str:
@@ -87,6 +86,7 @@ class UserHandle(commands.Cog):
         self.config.register_guild(
             role_assignments={},
             log_dm_user_id=None,  # user id to DM after background sync (toggle via !userhandle logdm)
+            role_blacklist=[],  # role names the bot must never create or add to tracked handles
         )
         self._sync_lock = asyncio.Lock()
         self._last_sync_error: Optional[str] = None  # for reporting when sync creates 0 roles
@@ -109,6 +109,14 @@ class UserHandle(commands.Cog):
             await user.send(f"{header}\n{message}")
         except (discord.Forbidden, discord.HTTPException):
             pass
+
+    async def _is_role_name_blacklisted(self, guild: discord.Guild, name: str) -> bool:
+        """True if this role name is blacklisted (case-insensitive). Protects special/restriction roles."""
+        if not (name or "").strip():
+            return False
+        blacklist = await self.config.guild(guild).role_blacklist()
+        n = (name or "").strip().lower()
+        return any((b or "").strip().lower() == n for b in (blacklist or []))
 
     async def cog_load(self) -> None:
         self.sync_role_names.start()
@@ -171,8 +179,8 @@ class UserHandle(commands.Cog):
                     async with self.config.guild(guild).role_assignments() as assignments:
                         a = _normalize_info(assignments.get(user_id_str) or {})
                         a["sync_role_id"] = None
-                        if a.get("custom_role_id") or a.get("custom_name"):
-                            assignments[user_id_str] = {k: a.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
+                        if a.get("custom_roles"):
+                            assignments[user_id_str] = {"sync_role_id": a.get("sync_role_id"), "custom_roles": a.get("custom_roles")}
                         else:
                             assignments.pop(user_id_str, None)
                     continue
@@ -254,7 +262,7 @@ class UserHandle(commands.Cog):
             async with self.config.guild(guild).role_assignments() as assignments:
                 entry = _normalize_info(assignments.get(user_id_str) or {})
                 entry["sync_role_id"] = role.id
-                assignments[user_id_str] = {k: entry.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
+                assignments[user_id_str] = {"sync_role_id": entry.get("sync_role_id"), "custom_roles": entry.get("custom_roles", [])}
         else:
             if role.name != name_to_use:
                 unique_name = self._unique_role_name(guild, name_to_use, existing_names, exclude_role=role)
@@ -274,39 +282,47 @@ class UserHandle(commands.Cog):
     async def _ensure_custom_role(
         self, guild: discord.Guild, member: discord.Member, custom_name: str
     ) -> Optional[discord.Role]:
-        """Create or update only the custom handle role. Does not touch the sync role."""
+        """Add a new custom handle role. Only roles we CREATE are tracked; we never adopt existing server roles (e.g. restriction roles)."""
         custom_name = (custom_name or "").strip() or member.name
+        if await self._is_role_name_blacklisted(guild, custom_name):
+            return None  # Caller should check and send a friendly message
         user_id_str = str(member.id)
         async with self.config.guild(guild).role_assignments() as assignments:
             info = _normalize_info(assignments.get(user_id_str) or {})
-            custom_role_id = info.get("custom_role_id")
+            custom_roles = list(info.get("custom_roles") or [])
+        # Only roles in custom_roles were created by us; if user already has one with this name, ensure they have it
+        for c in custom_roles:
+            rid = c.get("role_id")
+            if rid and c.get("name") == custom_name:
+                role = guild.get_role(rid)
+                if role and not member.get_role(rid):
+                    try:
+                        await member.add_roles(role, reason="UserHandle: assign custom handle")
+                    except (discord.Forbidden, discord.HTTPException) as e:
+                        if self._last_sync_error is None:
+                            self._last_sync_error = str(e)
+                return role
+        # Blacklist check for unique name we're about to use (e.g. "Name (2)")
         existing_names = {r.name for r in guild.roles}
-        role = guild.get_role(custom_role_id) if custom_role_id else None
-        if role is None:
-            unique_name = self._unique_role_name(guild, custom_name, existing_names)
-            try:
-                role = await guild.create_role(
-                    name=unique_name,
-                    reason="UserHandle: create custom handle",
-                )
-            except (discord.Forbidden, discord.HTTPException) as e:
-                log.warning("UserHandle: could not create custom role in guild %s: %s", guild.id, e)
-                if self._last_sync_error is None:
-                    self._last_sync_error = str(e)
-                return None
-            existing_names.add(role.name)
-        else:
-            if role.name != custom_name:
-                unique_name = self._unique_role_name(guild, custom_name, existing_names, exclude_role=role)
-                try:
-                    await role.edit(name=unique_name, reason="UserHandle: update custom handle")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+        unique_name = self._unique_role_name(guild, custom_name, existing_names)
+        if await self._is_role_name_blacklisted(guild, unique_name):
+            return None
+        # Create new role and add to tracked list only when we create it (never adopt existing server roles)
+        try:
+            role = await guild.create_role(
+                name=unique_name,
+                reason="UserHandle: create custom handle",
+            )
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log.warning("UserHandle: could not create custom role in guild %s: %s", guild.id, e)
+            if self._last_sync_error is None:
+                self._last_sync_error = str(e)
+            return None
+        custom_roles.append({"role_id": role.id, "name": role.name})
         async with self.config.guild(guild).role_assignments() as assignments:
             entry = _normalize_info(assignments.get(user_id_str) or {})
-            entry["custom_role_id"] = role.id
-            entry["custom_name"] = custom_name
-            assignments[user_id_str] = {k: entry.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
+            entry["custom_roles"] = custom_roles
+            assignments[user_id_str] = {"sync_role_id": entry.get("sync_role_id"), "custom_roles": entry["custom_roles"]}
         try:
             if not member.get_role(role.id):
                 await member.add_roles(role, reason="UserHandle: assign custom handle")
@@ -335,48 +351,156 @@ class UserHandle(commands.Cog):
         if sync_role is None:
             await ctx.send("I couldn't create or update your display-name role. Check that my role is above the roles I create and I have *Manage Roles*.")
             return
+        if await self._is_role_name_blacklisted(ctx.guild, name):
+            await ctx.send("That role name is reserved and can't be used for custom handles.")
+            return
         custom_role = await self._ensure_custom_role(ctx.guild, ctx.author, name)
         if custom_role is None:
-            await ctx.send("I couldn't create or update your custom handle. Check permissions.")
+            await ctx.send("I couldn't create or update your custom handle. Check permissions or that the name isn't reserved.")
             return
-        await ctx.send(f"You now have **{sync_role.name}** (from your display name) and **{custom_role.name}** (custom handle).")
+        info = _normalize_info((await self.config.guild(ctx.guild).role_assignments()).get(str(ctx.author.id)) or {})
+        custom_names = [c.get("name") for c in (info.get("custom_roles") or []) if c.get("name")]
+        custom_txt = ", ".join(f"**{n}**" for n in custom_names) if custom_names else custom_role.name
+        await ctx.send(f"Added **{custom_role.name}**. You now have: **{sync_role.name}** (display name) and {custom_txt} (custom handle(s)).")
         await self._send_log_dm(
             ctx.guild,
-            f"**Success (set)** — Custom handle added.\n"
+            f"**Success (set)** — Custom handle added (no other tags removed).\n"
             f"• **User affected:** {ctx.author.display_name} (username: `{ctx.author.name}`, id: `{ctx.author.id}`)\n"
-            f"• **Changes applied:** Assigned sync role **{sync_role.name}** (display name); assigned custom handle role **{custom_role.name}**."
+            f"• **Changes applied:** Assigned new custom handle role **{custom_role.name}**. All existing tags kept. Custom handles now: {custom_txt}."
         )
 
     @userhandle.command(name="clear")
     async def userhandle_clear(self, ctx: commands.Context) -> None:
-        """Remove your custom handle. Your display-name role is kept and will stay in sync."""
+        """Remove all your custom handle roles. Your display-name role is kept and will stay in sync."""
         user_id_str = str(ctx.author.id)
         async with self.config.guild(ctx.guild).role_assignments() as assignments:
             info = _normalize_info(assignments.get(user_id_str) or {})
-            custom_role_id = info.get("custom_role_id")
-            if not custom_role_id and not info.get("custom_name"):
-                await ctx.send("You don't have a custom handle set in this server.")
+            custom_roles = list(info.get("custom_roles") or [])
+            if not custom_roles:
+                await ctx.send("You don't have any custom handles set in this server.")
                 return
-            role = ctx.guild.get_role(custom_role_id) if custom_role_id else None
-            if role and ctx.author.get_role(custom_role_id):
-                try:
-                    await ctx.author.remove_roles(role, reason="UserHandle: clear custom handle")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+            removed_names = []
+            for c in custom_roles:
+                rid = c.get("role_id")
+                name = c.get("name", "?")
+                if rid:
+                    role = ctx.guild.get_role(rid)
+                    if role and ctx.author.get_role(rid):
+                        try:
+                            await ctx.author.remove_roles(role, reason="UserHandle: clear custom handle")
+                            removed_names.append(name)
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
             entry = _normalize_info(assignments.get(user_id_str) or {})
-            entry["custom_role_id"] = None
-            entry["custom_name"] = None
+            entry["custom_roles"] = []
             if entry.get("sync_role_id") is None:
                 assignments.pop(user_id_str, None)
             else:
-                assignments[user_id_str] = {k: v for k, v in entry.items() if k in ("sync_role_id", "custom_role_id", "custom_name")}
-        await ctx.send("Custom handle removed. Your display-name role is unchanged and will keep syncing.")
+                assignments[user_id_str] = {"sync_role_id": entry["sync_role_id"], "custom_roles": []}
+        n = len(removed_names)
+        await ctx.send(f"Custom handle(s) removed ({n} role(s)). Your display-name role is unchanged and will keep syncing.")
+        names_txt = ", ".join(f"**{x}**" for x in removed_names) if removed_names else "—"
         await self._send_log_dm(
             ctx.guild,
-            f"**Success (clear)** — Custom handle removed.\n"
+            f"**Success (clear)** — Custom handle(s) removed.\n"
             f"• **User affected:** {ctx.author.display_name} (username: `{ctx.author.name}`, id: `{ctx.author.id}`)\n"
-            f"• **Changes applied:** Custom handle role removed from user; sync role left unchanged."
+            f"• **Changes applied:** Removed custom handle role(s): {names_txt}. Sync role left unchanged."
         )
+
+    @userhandle.command(name="remove")
+    async def userhandle_remove(self, ctx: commands.Context, *, name: str) -> None:
+        """Remove one custom handle (only handles added by this bot via set). Your display-name role is unchanged."""
+        name = (name or "").strip()
+        if not name:
+            await ctx.send("Please provide the name of the custom handle to remove.")
+            return
+        user_id_str = str(ctx.author.id)
+        async with self.config.guild(ctx.guild).role_assignments() as assignments:
+            info = _normalize_info(assignments.get(user_id_str) or {})
+            custom_roles = list(info.get("custom_roles") or [])
+            # Only remove if this role is in our tracked list (created by set)
+            match_idx = None
+            for i, c in enumerate(custom_roles):
+                if (c.get("name") or "").strip() == name:
+                    match_idx = i
+                    break
+            if match_idx is None:
+                tracked = [c.get("name") for c in custom_roles if c.get("name")]
+                if not tracked:
+                    await ctx.send("You don't have any custom handles from this bot. Use `!userhandle set <name>` to add one.")
+                else:
+                    await ctx.send(
+                        f"**{name}** isn't in your tracked handles. You can only remove handles you added with `!userhandle set`. "
+                        f"Your tracked handles: {', '.join(f'**{n}**' for n in tracked)}."
+                    )
+                return
+            rid = custom_roles[match_idx].get("role_id")
+            role = ctx.guild.get_role(rid) if rid else None
+            if role and ctx.author.get_role(rid):
+                try:
+                    await ctx.author.remove_roles(role, reason="UserHandle: remove custom handle")
+                except (discord.Forbidden, discord.HTTPException):
+                    await ctx.send("I don't have permission to remove that role from you.")
+                    return
+            new_list = [c for i, c in enumerate(custom_roles) if i != match_idx]
+            entry = _normalize_info(assignments.get(user_id_str) or {})
+            entry["custom_roles"] = new_list
+            if not new_list and entry.get("sync_role_id") is None:
+                assignments.pop(user_id_str, None)
+            else:
+                assignments[user_id_str] = {"sync_role_id": entry.get("sync_role_id"), "custom_roles": new_list}
+        await ctx.send(f"Removed custom handle **{name}**. Your display-name role is unchanged.")
+        await self._send_log_dm(
+            ctx.guild,
+            f"**Success (remove)** — One custom handle removed.\n"
+            f"• **User affected:** {ctx.author.display_name} (username: `{ctx.author.name}`, id: `{ctx.author.id}`)\n"
+            f"• **Changes applied:** Removed tracked handle **{name}** (only roles added via set can be removed)."
+        )
+
+    @userhandle.group(name="blacklist", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_blacklist(self, ctx: commands.Context) -> None:
+        """[Admin] List role names that this bot must never create or add to tracked handles (e.g. restriction/special roles)."""
+        if ctx.invoked_subcommand is not None:
+            return
+        names = await self.config.guild(ctx.guild).role_blacklist()
+        names = [n for n in (names or []) if (n or "").strip()]
+        if not names:
+            await ctx.send("Role blacklist is empty. Use `!userhandle blacklist add <name>` to add reserved role names.")
+            return
+        await ctx.send(f"**Reserved role names** (bot will not create or track these): {', '.join(f'**{n}**' for n in names)}.")
+
+    @userhandle_blacklist.command(name="add")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_blacklist_add(self, ctx: commands.Context, *, name: str) -> None:
+        """[Admin] Add a role name to the blacklist. The bot will never create or track a handle with this name."""
+        name = (name or "").strip()
+        if not name:
+            await ctx.send("Please provide a role name to blacklist.")
+            return
+        bl = list(await self.config.guild(ctx.guild).role_blacklist() or [])
+        if name.lower() in [b.strip().lower() for b in bl if b]:
+            await ctx.send(f"**{name}** is already on the blacklist.")
+            return
+        bl.append(name)
+        await self.config.guild(ctx.guild).role_blacklist.set(bl)
+        await ctx.send(f"**{name}** is now reserved. The bot will not create or track custom handles with this name.")
+
+    @userhandle_blacklist.command(name="remove")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_blacklist_remove(self, ctx: commands.Context, *, name: str) -> None:
+        """[Admin] Remove a role name from the blacklist."""
+        name = (name or "").strip()
+        if not name:
+            await ctx.send("Please provide a role name to remove from the blacklist.")
+            return
+        bl = list(await self.config.guild(ctx.guild).role_blacklist() or [])
+        new_bl = [b for b in bl if (b or "").strip().lower() != name.lower()]
+        if len(new_bl) == len(bl):
+            await ctx.send(f"**{name}** was not on the blacklist.")
+            return
+        await self.config.guild(ctx.guild).role_blacklist.set(new_bl)
+        await ctx.send(f"**{name}** removed from the blacklist.")
 
     @userhandle.command(name="logdm")
     @commands.admin_or_permissions(manage_roles=True)
