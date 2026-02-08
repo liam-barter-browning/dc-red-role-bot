@@ -331,11 +331,61 @@ class UserHandle(commands.Cog):
                 self._last_sync_error = str(e)
         return role
 
+    def _is_admin_or_manage_roles(self, ctx: commands.Context) -> bool:
+        """True if the author has Administrator or Manage Roles in this guild."""
+        perms = ctx.author.guild_permissions
+        return perms.administrator or perms.manage_roles
+
     @commands.group(name="userhandle", invoke_without_command=True)
     async def userhandle(self, ctx: commands.Context) -> None:
         """User handles: a role per member matching their display name (or custom handle) for easier tagging."""
         if ctx.invoked_subcommand is None:
             await ctx.send_help()
+
+    @userhandle.command(name="help")
+    async def userhandle_help(self, ctx: commands.Context) -> None:
+        """Show a guide on how to use UserHandle. Admins see admin-only commands too."""
+        p = ctx.clean_prefix
+        embed = discord.Embed(
+            title="UserHandle — Usage guide",
+            description=(
+                "This cog gives you a **display-name role** (synced with your server nickname) "
+                "and lets you add **custom handle** roles so others can @mention you by those names from any channel."
+            ),
+            color=0x5865F2,  # Discord blurple
+        )
+        embed.add_field(
+            name="Your roles",
+            value=(
+                "• **Display-name role** — Created automatically; its name matches your server nickname (or username). "
+                "It updates when you change your nickname.\n"
+                "• **Custom handles** — Roles you add with the commands below. You can have multiple; only roles *created by this bot* via `set` are tracked."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Commands (everyone)",
+            value=(
+                f"**{p}userhandle set <name>** — Add a custom handle. Only adds; does not remove others.\n"
+                f"**{p}userhandle remove <name>** — Remove one custom handle (only those you added with `set`).\n"
+                f"**{p}userhandle clear** — Remove all your custom handles. Display-name role is kept."
+            ),
+            inline=False,
+        )
+        if self._is_admin_or_manage_roles(ctx):
+            embed.add_field(
+                name="Commands (admin)",
+                value=(
+                    f"**{p}userhandle sync** — Ensure every member has a display-name role (run once for existing members).\n"
+                    f"**{p}userhandle logdm** — Toggle DMs for set/clear/remove/sync and background sync.\n"
+                    f"**{p}userhandle blacklist** — List reserved role names the bot will never create.\n"
+                    f"**{p}userhandle blacklist add <name>** — Reserve a role name.\n"
+                    f"**{p}userhandle blacklist remove <name>** — Unreserve a role name."
+                ),
+                inline=False,
+            )
+        embed.set_footer(text=f"Cog v{__version__} • Use {p}help userhandle for command list.")
+        await ctx.send(embed=embed)
 
     @userhandle.command(name="set")
     async def userhandle_set(self, ctx: commands.Context, *, name: str) -> None:

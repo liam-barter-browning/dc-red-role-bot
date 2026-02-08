@@ -115,7 +115,8 @@ If you prefer to run from a clone on the same machine as the bot:
 
 | Command | Description |
 |--------|-------------|
-| `[p]userhandle` | Show help. |
+| `[p]userhandle` | Show command list. |
+| `[p]userhandle help` | Show a usage guide. If you have admin or Manage Roles, the guide includes admin-only commands. |
 | `[p]userhandle set <name>` | Add a custom handle (role) for yourself. Only adds; does not remove other handles. You can have multiple. |
 | `[p]userhandle remove <name>` | Remove one custom handle. Only removes roles that were added by this bot via `set` (tracked handles). |
 | `[p]userhandle clear` | Remove **all** your custom handles (tracked by this bot). Your display-name role is kept and keeps syncing. |
