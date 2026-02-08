@@ -17,8 +17,26 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "1.4"
+__version__ = "1.7"
 log = logging.getLogger("red.cog.user_handle")
+
+
+def _normalize_info(info: dict) -> dict:
+    """Normalize stored info to sync_role_id, custom_role_id, custom_name. Handles old format (role_id + custom_name)."""
+    out = {
+        "sync_role_id": info.get("sync_role_id"),
+        "custom_role_id": info.get("custom_role_id"),
+        "custom_name": info.get("custom_name"),
+    }
+    legacy_role_id = info.get("role_id")
+    if legacy_role_id is not None and out["sync_role_id"] is None and out["custom_role_id"] is None:
+        if out["custom_name"]:
+            out["custom_role_id"] = legacy_role_id
+            out["sync_role_id"] = None
+        else:
+            out["sync_role_id"] = legacy_role_id
+            out["custom_role_id"] = None
+    return out
 
 
 def _display_name(member: discord.Member) -> str:
@@ -68,6 +86,7 @@ class UserHandle(commands.Cog):
         self.config = Config.get_conf(self, identifier=0x726F6C655F746167, force_registration=True)
         self.config.register_guild(role_assignments={})  # user_id -> {"role_id": int, "custom_name": str | None}
         self._sync_lock = asyncio.Lock()
+        self._last_sync_error: Optional[str] = None  # for reporting when sync creates 0 roles
 
     async def cog_load(self) -> None:
         self.sync_role_names.start()
@@ -92,55 +111,56 @@ class UserHandle(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _sync_guild_roles(self, guild: discord.Guild) -> None:
+        """Background: only update sync (display-name) roles. Never touch custom roles or roles we didn't create."""
         data = await self.config.guild(guild).role_assignments()
         if not data:
             return
-        # Ensure member cache is populated so get_member() can find members
         try:
             await guild.chunk()
         except discord.HTTPException:
-            pass  # Skip this guild this cycle
+            pass
         existing_names = {r.name for r in guild.roles}
         for user_id_str, info in list(data.items()):
             try:
-                role_id = info.get("role_id")
-                custom_name = info.get("custom_name")
-                if not role_id:
+                info = _normalize_info(info)
+                sync_role_id = info.get("sync_role_id")
+                if not sync_role_id:
                     continue
-                role = guild.get_role(role_id)
+                role = guild.get_role(sync_role_id)
                 if not role:
-                    # Role was deleted; remove from config and skip
                     async with self.config.guild(guild).role_assignments() as assignments:
-                        assignments.pop(user_id_str, None)
+                        a = _normalize_info(assignments.get(user_id_str) or {})
+                        a["sync_role_id"] = None
+                        if a.get("custom_role_id") or a.get("custom_name"):
+                            assignments[user_id_str] = {k: a.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
+                        else:
+                            assignments.pop(user_id_str, None)
                     continue
                 member = guild.get_member(int(user_id_str))
                 if not member:
-                    # Member left; leave role/config as-is (they may rejoin)
                     continue
-                if custom_name:
-                    desired_name = custom_name
-                else:
-                    desired_name = _display_name(member)
-                desired_name = desired_name.strip() or member.name
+                desired_name = (_display_name(member) or member.name).strip() or member.name
                 if role.name == desired_name:
+                    if not member.get_role(sync_role_id):
+                        try:
+                            await member.add_roles(role, reason="UserHandle: re-add sync role")
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
                     continue
-                # Ensure name is unique in guild
                 unique_name = self._unique_role_name(guild, desired_name, existing_names, exclude_role=role)
                 try:
                     await role.edit(name=unique_name, reason="UserHandle: sync display name")
                     existing_names.discard(role.name)
                     existing_names.add(unique_name)
-                except discord.Forbidden:
-                    log.warning("UserHandle: no permission to edit role %s in guild %s", role.id, guild.id)
-                except discord.HTTPException as e:
-                    log.warning("UserHandle: failed to edit role %s: %s", role.id, e)
-                if not member.get_role(role_id):
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                if not member.get_role(sync_role_id):
                     try:
-                        await member.add_roles(role, reason="UserHandle: re-add role after sync")
-                    except (discord.Forbidden, discord.HTTPException) as e:
-                        log.warning("UserHandle: could not add role to %s: %s", member.id, e)
-            except (ValueError, KeyError) as e:
-                log.debug("UserHandle: skip user %s in guild %s: %s", user_id_str, guild.id, e)
+                        await member.add_roles(role, reason="UserHandle: re-add sync role")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+            except (ValueError, KeyError):
+                pass
             await asyncio.sleep(0.2)
 
     def _unique_role_name(
@@ -163,54 +183,90 @@ class UserHandle(commands.Cog):
             i += 1
         return f"{base_name} ({i})"
 
-    async def _ensure_member_role(
-        self,
-        guild: discord.Guild,
-        member: discord.Member,
-        custom_name: Optional[str] = None,
-    ) -> Optional[discord.Role]:
-        """Create or get the member's tag role, assign it, and return the role. Returns None on failure."""
+    async def _ensure_sync_role(self, guild: discord.Guild, member: discord.Member) -> Optional[discord.Role]:
+        """Create or update only the sync (display-name) role for this member. Only touches roles we created (in config)."""
+        user_id_str = str(member.id)
         async with self.config.guild(guild).role_assignments() as assignments:
-            user_id_str = str(member.id)
-            info = assignments.get(user_id_str) or {}
-            role_id = info.get("role_id")
-            stored_custom = info.get("custom_name")
-            # If we're being called with a new custom name, use it; else use stored
-            name_to_use = custom_name if custom_name is not None else stored_custom
-            if name_to_use is None:
-                name_to_use = _display_name(member)
-            name_to_use = (name_to_use or member.name).strip() or member.name
-
+            info = _normalize_info(assignments.get(user_id_str) or {})
+            sync_role_id = info.get("sync_role_id")
+        name_to_use = (_display_name(member) or member.name).strip() or member.name
         existing_names = {r.name for r in guild.roles}
-        role = guild.get_role(role_id) if role_id else None
-
+        role = guild.get_role(sync_role_id) if sync_role_id else None
         if role is None:
             unique_name = self._unique_role_name(guild, name_to_use, existing_names)
             try:
                 role = await guild.create_role(
                     name=unique_name,
-                    reason="UserHandle: create role for member",
+                    reason="UserHandle: create sync role",
                 )
             except (discord.Forbidden, discord.HTTPException) as e:
-                log.warning("UserHandle: could not create role in guild %s: %s", guild.id, e)
+                log.warning("UserHandle: could not create sync role in guild %s: %s", guild.id, e)
+                if self._last_sync_error is None:
+                    self._last_sync_error = str(e)
                 return None
             existing_names.add(role.name)
             async with self.config.guild(guild).role_assignments() as assignments:
-                assignments[user_id_str] = {"role_id": role.id, "custom_name": custom_name if custom_name is not None else stored_custom}
+                entry = _normalize_info(assignments.get(user_id_str) or {})
+                entry["sync_role_id"] = role.id
+                assignments[user_id_str] = {k: entry.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
         else:
             if role.name != name_to_use:
                 unique_name = self._unique_role_name(guild, name_to_use, existing_names, exclude_role=role)
                 try:
-                    await role.edit(name=unique_name, reason="UserHandle: update role name")
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    log.warning("UserHandle: could not edit role %s: %s", role.id, e)
-
+                    await role.edit(name=unique_name, reason="UserHandle: sync display name")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
         try:
             if not member.get_role(role.id):
-                await member.add_roles(role, reason="UserHandle: assign tag role")
+                await member.add_roles(role, reason="UserHandle: assign sync role")
         except (discord.Forbidden, discord.HTTPException) as e:
-            log.warning("UserHandle: could not add role to member %s: %s", member.id, e)
+            if self._last_sync_error is None:
+                self._last_sync_error = str(e)
             return role
+        return role
+
+    async def _ensure_custom_role(
+        self, guild: discord.Guild, member: discord.Member, custom_name: str
+    ) -> Optional[discord.Role]:
+        """Create or update only the custom handle role. Does not touch the sync role."""
+        custom_name = (custom_name or "").strip() or member.name
+        user_id_str = str(member.id)
+        async with self.config.guild(guild).role_assignments() as assignments:
+            info = _normalize_info(assignments.get(user_id_str) or {})
+            custom_role_id = info.get("custom_role_id")
+        existing_names = {r.name for r in guild.roles}
+        role = guild.get_role(custom_role_id) if custom_role_id else None
+        if role is None:
+            unique_name = self._unique_role_name(guild, custom_name, existing_names)
+            try:
+                role = await guild.create_role(
+                    name=unique_name,
+                    reason="UserHandle: create custom handle",
+                )
+            except (discord.Forbidden, discord.HTTPException) as e:
+                log.warning("UserHandle: could not create custom role in guild %s: %s", guild.id, e)
+                if self._last_sync_error is None:
+                    self._last_sync_error = str(e)
+                return None
+            existing_names.add(role.name)
+        else:
+            if role.name != custom_name:
+                unique_name = self._unique_role_name(guild, custom_name, existing_names, exclude_role=role)
+                try:
+                    await role.edit(name=unique_name, reason="UserHandle: update custom handle")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+        async with self.config.guild(guild).role_assignments() as assignments:
+            entry = _normalize_info(assignments.get(user_id_str) or {})
+            entry["custom_role_id"] = role.id
+            entry["custom_name"] = custom_name
+            assignments[user_id_str] = {k: entry.get(k) for k in ("sync_role_id", "custom_role_id", "custom_name")}
+        try:
+            if not member.get_role(role.id):
+                await member.add_roles(role, reason="UserHandle: assign custom handle")
+        except (discord.Forbidden, discord.HTTPException) as e:
+            if self._last_sync_error is None:
+                self._last_sync_error = str(e)
         return role
 
     @commands.group(name="userhandle", invoke_without_command=True)
@@ -221,9 +277,7 @@ class UserHandle(commands.Cog):
 
     @userhandle.command(name="set")
     async def userhandle_set(self, ctx: commands.Context, *, name: str) -> None:
-        """Set a custom role name (handle) for yourself in this server.
-        Use this if your name uses a different alphabet and you want an English (or other) handle for tagging.
-        """
+        """Add a custom handle (role) for yourself. You keep your display-name role and gain this one too."""
         name = name.strip()
         if not name:
             await ctx.send("Please provide a non-empty name.")
@@ -231,34 +285,46 @@ class UserHandle(commands.Cog):
         if len(name) > 100:
             await ctx.send("Name must be 100 characters or fewer.")
             return
-        role = await self._ensure_member_role(ctx.guild, ctx.author, custom_name=name)
-        if role is None:
-            await ctx.send("I couldn't create or update your role. Check that my role is above the role I create and I have *Manage Roles*.")
+        sync_role = await self._ensure_sync_role(ctx.guild, ctx.author)
+        if sync_role is None:
+            await ctx.send("I couldn't create or update your display-name role. Check that my role is above the roles I create and I have *Manage Roles*.")
             return
-        async with self.config.guild(ctx.guild).role_assignments() as assignments:
-            assignments[str(ctx.author.id)] = {"role_id": role.id, "custom_name": name}
-        await ctx.send(f"Your tag role is now **{role.name}**.")
+        custom_role = await self._ensure_custom_role(ctx.guild, ctx.author, name)
+        if custom_role is None:
+            await ctx.send("I couldn't create or update your custom handle. Check permissions.")
+            return
+        await ctx.send(f"You now have **{sync_role.name}** (from your display name) and **{custom_role.name}** (custom handle).")
 
     @userhandle.command(name="clear")
     async def userhandle_clear(self, ctx: commands.Context) -> None:
-        """Clear your custom role name and sync the role to your current display name."""
+        """Remove your custom handle. Your display-name role is kept and will stay in sync."""
+        user_id_str = str(ctx.author.id)
         async with self.config.guild(ctx.guild).role_assignments() as assignments:
-            user_id_str = str(ctx.author.id)
-            if user_id_str not in assignments:
-                await ctx.send("You don't have a tag role set in this server.")
+            info = _normalize_info(assignments.get(user_id_str) or {})
+            custom_role_id = info.get("custom_role_id")
+            if not custom_role_id and not info.get("custom_name"):
+                await ctx.send("You don't have a custom handle set in this server.")
                 return
-            info = assignments[user_id_str]
-            info["custom_name"] = None
-        role = await self._ensure_member_role(ctx.guild, ctx.author, custom_name=None)
-        if role is None:
-            await ctx.send("I couldn't update your role. Check permissions.")
-            return
-        await ctx.send(f"Custom name cleared. Your tag role is now **{role.name}** (synced to your display name).")
+            role = ctx.guild.get_role(custom_role_id) if custom_role_id else None
+            if role and ctx.author.get_role(custom_role_id):
+                try:
+                    await ctx.author.remove_roles(role, reason="UserHandle: clear custom handle")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            entry = _normalize_info(assignments.get(user_id_str) or {})
+            entry["custom_role_id"] = None
+            entry["custom_name"] = None
+            if entry.get("sync_role_id") is None:
+                assignments.pop(user_id_str, None)
+            else:
+                assignments[user_id_str] = {k: v for k, v in entry.items() if k in ("sync_role_id", "custom_role_id", "custom_name")}
+        await ctx.send("Custom handle removed. Your display-name role is unchanged and will keep syncing.")
 
     @userhandle.command(name="sync")
     @commands.admin_or_permissions(manage_roles=True)
     async def userhandle_sync(self, ctx: commands.Context) -> None:
         """[Admin] Ensure every member has a tag role and names are in sync. Run this after enabling the cog on a server with existing members."""
+        self._last_sync_error = None
         await ctx.send(f"Syncing tag roles for all members… This may take a while. (cog v{__version__})")
         # Try cache first (chunk so gateway sends member list)
         try:
@@ -283,23 +349,27 @@ class UserHandle(commands.Cog):
                 "If the problem persists, push the latest cog code to GitHub and run `!repo update dc-red-role-bot` then `!cog update user_handle`."
             )
             return
+        # Only create/update sync (display-name) roles. Custom handles are never touched.
         async with self._sync_lock:
             created = 0
             for member in members_list:
-                role = await self._ensure_member_role(ctx.guild, member, custom_name=None)
+                role = await self._ensure_sync_role(ctx.guild, member)
                 if role is not None:
                     created += 1
                 await asyncio.sleep(0.3)
-        msg = f"Sync complete. Tag roles ensured for {created} non-bot members. (cog v{__version__})"
+        msg = f"Sync complete. Display-name roles ensured for {created} non-bot members (custom handles left unchanged). (cog v{__version__})"
         if rest_used:
             msg += " (used API fallback)"
         if members_list and created == 0:
             msg += " — No roles were created: check that the bot has **Manage Roles** and its role is **above** the roles it creates in Server settings → Roles."
+            if self._last_sync_error:
+                msg += f" Discord error: `{self._last_sync_error}`"
+                self._last_sync_error = None
         await ctx.send(msg)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
-        """Give new members their tag role (display name or existing custom name)."""
+        """Give new members their display-name sync role only."""
         if member.bot:
             return
-        await self._ensure_member_role(member.guild, member, custom_name=None)
+        await self._ensure_sync_role(member.guild, member)
