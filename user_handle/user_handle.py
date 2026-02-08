@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.3"
+__version__ = "2.4"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -99,11 +99,19 @@ class UserHandle(commands.Cog):
         log_channel_id = await self.config.guild(guild).log_channel_id()
         if log_channel_id:
             channel = guild.get_channel(log_channel_id)
-            if channel:
+            if channel is None:
+                try:
+                    channel = await guild.fetch_channel(log_channel_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                    log.warning("UserHandle: log channel %s not found or inaccessible in guild %s: %s", log_channel_id, guild.id, e)
+                    return
+            if channel is not None and isinstance(channel, discord.TextChannel):
                 try:
                     await channel.send(full)
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    log.warning("UserHandle: could not send log to channel %s in guild %s: %s", log_channel_id, guild.id, e)
+            elif channel is not None:
+                log.warning("UserHandle: log channel %s in guild %s is not a text channel", log_channel_id, guild.id)
             return
         log_dm_id = await self.config.guild(guild).log_dm_user_id()
         if not log_dm_id:
