@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.13"
+__version__ = "2.14"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -460,7 +460,9 @@ class UserHandle(commands.Cog):
                     f"**{p}userhandle blacklist** — List reserved role names the bot will never create.\n"
                     f"**{p}userhandle blacklist add <name>** — Reserve a role name.\n"
                     f"**{p}userhandle blacklist remove <name>** — Unreserve a role name.\n"
-                    f"**{p}userhandle cleanup** — Remove all UserHandle roles in this server and turn off the background chron."
+                    f"**{p}userhandle cleanup** — Remove all UserHandle roles in this server and turn off the background chron.\n"
+                    f"**{p}userhandle chron on** — Re-enable the background chron for this server.\n"
+                    f"**{p}userhandle chron off** — Pause the background chron (roles unchanged)."
                 ),
                 inline=False,
             )
@@ -797,6 +799,26 @@ class UserHandle(commands.Cog):
             f"**Success (cleanup)** — Admin ran cleanup in this server.\n"
             f"• Roles deleted: {deleted}, failed: {failed}. Chron disabled for this server."
         )
+
+    @userhandle.group(name="chron", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_chron(self, ctx: commands.Context) -> None:
+        """[Admin] Turn the background sync (chron) on or off for this server. Use after cleanup to re-enable."""
+        await ctx.send_help()
+
+    @userhandle_chron.command(name="on")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_chron_on(self, ctx: commands.Context) -> None:
+        """[Admin] Re-enable the background chron for this server (e.g. after cleanup)."""
+        await self.config.guild(ctx.guild).chron_disabled.set(False)
+        await ctx.send("Background sync (chron) is now **on** for this server. Display-name roles will be updated every ~5 minutes.")
+
+    @userhandle_chron.command(name="off")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_chron_off(self, ctx: commands.Context) -> None:
+        """[Admin] Pause the background chron for this server (roles are left as-is)."""
+        await self.config.guild(ctx.guild).chron_disabled.set(True)
+        await ctx.send("Background sync (chron) is now **off** for this server. Run `userhandle chron on` to turn it back on.")
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
