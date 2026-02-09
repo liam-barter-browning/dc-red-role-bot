@@ -17,7 +17,7 @@ try:
 except ImportError:
     Route = None
 
-__version__ = "2.9"
+__version__ = "2.13"
 log = logging.getLogger("red.cog.user_handle")
 
 
@@ -88,6 +88,7 @@ class UserHandle(commands.Cog):
             log_dm_user_id=None,  # user id to DM (toggle via !userhandle logdm); cleared when log channel is set
             log_channel_id=None,  # channel to send logs to (set via !userhandle logchannel); cleared when logdm is set
             role_blacklist=[],  # role names the bot must never create or add to tracked handles
+            chron_disabled=False,  # set True by cleanup; chron skips this guild when True
         )
         self._sync_lock = asyncio.Lock()
         self._last_sync_error: Optional[str] = None  # for reporting when sync creates 0 roles
@@ -179,6 +180,8 @@ class UserHandle(commands.Cog):
         await self.bot.wait_until_ready()
         async with self._sync_lock:
             for guild in self.bot.guilds:
+                if await self.config.guild(guild).chron_disabled():
+                    continue
                 try:
                     result = await self._sync_guild_roles(guild)
                     if result is not None:
@@ -456,7 +459,8 @@ class UserHandle(commands.Cog):
                     f"**{p}userhandle logchannel [#channel]** — Send logs to a channel instead of DMs (no channel = off).\n"
                     f"**{p}userhandle blacklist** — List reserved role names the bot will never create.\n"
                     f"**{p}userhandle blacklist add <name>** — Reserve a role name.\n"
-                    f"**{p}userhandle blacklist remove <name>** — Unreserve a role name."
+                    f"**{p}userhandle blacklist remove <name>** — Unreserve a role name.\n"
+                    f"**{p}userhandle cleanup** — Remove all UserHandle roles in this server and turn off the background chron."
                 ),
                 inline=False,
             )
@@ -749,6 +753,50 @@ class UserHandle(commands.Cog):
                 self._last_sync_error = None
         await ctx.send(msg)
         # No logging for manual sync (auto-generated display-name roles) to avoid noise
+
+    @userhandle.command(name="cleanup")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def userhandle_cleanup(self, ctx: commands.Context) -> None:
+        """[Admin] Remove all UserHandle roles in this server and turn off the background chron for this server."""
+        guild = ctx.guild
+        assignments = await self.config.guild(guild).role_assignments()
+        if not assignments:
+            await ctx.send("There are no UserHandle role assignments in this server. Chron is already effectively off for this server.")
+            return
+        # Collect all role IDs we created (sync + custom)
+        role_ids = set()
+        for user_id_str, data in assignments.items():
+            info = _normalize_info(data or {})
+            sid = info.get("sync_role_id")
+            if sid:
+                role_ids.add(sid)
+            for c in info.get("custom_roles") or []:
+                rid = c.get("role_id")
+                if rid:
+                    role_ids.add(rid)
+        deleted = 0
+        failed = 0
+        for rid in role_ids:
+            role = guild.get_role(rid)
+            if role:
+                try:
+                    await role.delete(reason="UserHandle: cleanup command")
+                    deleted += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    failed += 1
+            await asyncio.sleep(0.2)
+        await self.config.guild(guild).role_assignments.set({})
+        await self.config.guild(guild).chron_disabled.set(True)
+        msg = (
+            f"**Cleanup done.** Deleted {deleted} role(s), failed to delete {failed}. "
+            "All UserHandle data for this server has been cleared and the background chron will skip this server."
+        )
+        await ctx.send(msg)
+        await self._send_log_dm(
+            guild,
+            f"**Success (cleanup)** — Admin ran cleanup in this server.\n"
+            f"• Roles deleted: {deleted}, failed: {failed}. Chron disabled for this server."
+        )
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member) -> None:
